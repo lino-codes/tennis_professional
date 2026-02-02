@@ -168,8 +168,8 @@ class TennisDataAnalysis():
          p-value: how confident you can be that the relationship is real.
          """
         for tour_name, tour_df in self.test_data.items():
-            print(f'The date range of data is from {tour_df['Date'].min().strftime("%Y%m%d")} to '
-                  f'{tour_df['Date'].max().strftime("%Y%m%d")}')
+            # print(f'The date range of data is from {tour_df['Date'].min().strftime("%Y%m%d")} to '
+            #       f'{tour_df['Date'].max().strftime("%Y%m%d")}')
             # print(tour_df[['Winner', 'Loser', 'WRank', 'LRank', 'WPts', 'LPts', strategy]].head())
             # NOTE: removing matches if the players have no ranking
             tour_df = tour_df.dropna(subset=['WRank', 'LRank'])
@@ -180,13 +180,12 @@ class TennisDataAnalysis():
             tour_df["ranking_profit"] = np.where(tour_df[strategy], tour_df["ranking_bet_odds"] - 1, -1)
             total_profit = tour_df["ranking_profit"].sum()
             rank_accuracy = tour_df[strategy].mean()*100
-            print(f'The potential profit for {tour_name} using {strategy} is {total_profit:.2f}')
-            print(f'The accuracy for {tour_name} using {strategy} is {rank_accuracy:.2f}%')
+            # print(f'The potential profit for {tour_name} using {strategy} is {total_profit:.2f}')
+            # print(f'The accuracy for {tour_name} using {strategy} is {rank_accuracy:.2f}%')
             # NOTE: End of
 
             tour_df['RankDiff'] = tour_df['WRank'] - tour_df['LRank']
             tour_df['PtsDiff'] = tour_df['WPts'] - tour_df['LPts']
-            print(tour_df[['Winner', 'Loser', strategy, 'RankDiff', 'PtsDiff']].tail())
             # Correlation 1: HRankWins vs RankDiff
             corr_rank = scipy.stats.pointbiserialr(tour_df['HRankWins'], tour_df['RankDiff'])
             print(f"{tour_name}: HRankWins vs RankDiff: strength, r = {corr_rank[0]:.4f}, "
@@ -205,17 +204,37 @@ class TennisDataAnalysis():
             y = tour_df['HRankWins']
             model = LogisticRegression()
             model.fit(X, y)
+            # NOTE: The standard train test split approach
+            # X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+            # model.fit(X_train, y_train)
+            # print(f"Accuracy: {model.score(X_test, y_test):.3f}")
+            # NOTE: End of
 
-            tour_df['Prob_HRankWins_1'] = model.predict_proba(X)[:, 1]
-            print(tour_df[['Winner', 'Loser', 'HRankWins',  'WPts', 'LPts', 'PtsDiff',
-                           'Prob_HRankWins_1']].sort_values(by='Prob_HRankWins_1', ascending=False).head(10))
+            new_df = self.tennis_data[tour_name]
+            new_df['PtsDiff'] = new_df['WPts'] - new_df['LPts']
+            new_df['AbsPtsDiff'] = new_df['PtsDiff'].abs()
+            X_new = new_df[['AbsPtsDiff']]
+
+            # Predict probabilities
+            new_df['Prob_HRankWins'] = model.predict_proba(X_new)[:, 1] # after fitting full year data
+            new_df["HRankWins"] = np.where(new_df["WRank"] < new_df['LRank'], 1, 0)
+            confident_df = new_df[new_df['Prob_HRankWins'] > 0.6]
+            confident_df["ranking_bet_odds"] = np.where((confident_df['HRankWins'] == 1), confident_df["AvgW"], confident_df["AvgL"])
+            print(confident_df[['Winner', 'Loser', 'HRankWins',  'WPts', 'LPts', 'PtsDiff',
+                           'Prob_HRankWins', 'ranking_bet_odds']].sort_values(by='Prob_HRankWins', ascending=False))
+
+            confident_df["ranking_profit"] = np.where(confident_df['HRankWins'], confident_df["ranking_bet_odds"] - 1, -1)
+            total_profit = confident_df["ranking_profit"].sum()
+            rank_accuracy = confident_df['HRankWins'].mean() * 100
+            print('This is based on confidence level')
+            print(f'The potential profit for {tour_name} using {'HRankWins'} is {total_profit:.2f}')
+            print(f'The accuracy for {tour_name} using {'HrankWins'} is {rank_accuracy:.2f}%')
 
 
-
-
-
-
-
+            # NOTE: On full year data
+            # tour_df['Prob_HRankWins_1'] = model.predict_proba(X)[:, 1]
+            # print(tour_df[['Winner', 'Loser', 'HRankWins',  'WPts', 'LPts', 'PtsDiff',
+            #                'Prob_HRankWins_1']].sort_values(by='Prob_HRankWins_1', ascending=False).head(10))
 
 
     def elo_strategy(self, strategy='HEloWins'):
