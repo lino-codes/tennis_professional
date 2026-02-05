@@ -153,7 +153,7 @@ class TennisDataAnalysis():
             self.full_data[tour_name] = tour_df
 
 
-    def h2h_construct(self):
+    def h2h_get(self):
         """
         Add pre-match head-to-head features to tennis match dataframe.
 
@@ -409,7 +409,7 @@ class TennisDataAnalysis():
             print(f"Total elo profit for {tour_name}: {total_profit}")\
 
     def run_analysis(self):
-        self.h2h_construct()
+        self.h2h_get()
         # self.ranking_construct()
         # self.h2h_feature_engineering()
         # self.ranking_stats_construct()
