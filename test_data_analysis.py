@@ -154,7 +154,7 @@ class TennisDataAnalysis():
 
 
     def h2h_construct(self):
-        '''
+        """
         Add pre-match head-to-head features to tennis match dataframe.
 
         Parameters:
@@ -166,18 +166,14 @@ class TennisDataAnalysis():
         --------
         pd.DataFrame with additional columns:
             - Winner_H2H_Wins: Winner's wins vs Loser before this match
-            - Winner_H2H_Losses: Winner's losses vs Loser before this match
             - Loser_H2H_Wins: Loser's wins vs Winner before this match
-            - Loser_H2H_Losses: Loser's losses vs Winner before this match
-        '''
+        """
 
         for tour_name, full_df in self.full_data.items():
             df = full_df.sort_values('Date').copy()
 
             df['Winner_H2H_Wins'] = 0
-            df['Winner_H2H_Losses'] = 0
             df['Loser_H2H_Wins'] = 0
-            df['Loser_H2H_Losses'] = 0
 
             match_history = {}
 
@@ -193,13 +189,13 @@ class TennisDataAnalysis():
                     loser_prev_wins = sum(1 for _, w in prev_matches if w == loser)
 
                     df.at[idx, 'Winner_H2H_Wins'] = winner_prev_wins
-                    df.at[idx, 'Winner_H2H_Losses'] = loser_prev_wins
                     df.at[idx, 'Loser_H2H_Wins'] = loser_prev_wins
-                    df.at[idx, 'Loser_H2H_Losses'] = winner_prev_wins
 
                 if players not in match_history:
                     match_history[players] = []
                 match_history[players].append((row['Date'], winner))
+
+            print(df.tail())
             self.full_data[tour_name] = df
 
 
@@ -414,11 +410,10 @@ class TennisDataAnalysis():
 
     def run_analysis(self):
         self.h2h_construct()
-
-        self.ranking_construct()
-        self.h2h_feature_engineering()
-        self.ranking_stats_construct()
-        self.model_fitting(feature_cols=['Pts_Ratio'], target_variable='HRankWins', confidence_level=0.65)
+        # self.ranking_construct()
+        # self.h2h_feature_engineering()
+        # self.ranking_stats_construct()
+        # self.model_fitting(feature_cols=['Pts_Ratio'], target_variable='HRankWins', confidence_level=0.65)
         # self.elo_construct(elo_start_date=datetime.date(2024,12,20))
         # self.elo_strategy()
 
