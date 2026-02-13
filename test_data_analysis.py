@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 
 from test_df_helper import pandas_show_all
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 
 
@@ -195,84 +196,27 @@ class TennisDataAnalysis():
                     match_history[players] = []
                 match_history[players].append((row['Date'], winner))
 
-            print(df.tail())
+            self.full_data[tour_name] = df
+
+    def h2h_feature(self):
+        print('We are now in h2h_feature')
+        for tour_name, full_df in self.full_data.items():
+            df = full_df.copy()
+            df['h2h_matches'] = df['Winner_H2H_Wins'].fillna(0) + df['Loser_H2H_Wins'].fillna(0)
+            alpha = 1.0  # Pseudocount (standard Laplace)
+            # Smoothed win share
+            df['h2h_win_share_sm'] = (df['Winner_H2H_Wins'] + alpha) / (df['h2h_matches'] + 2 * alpha)
+
+            # NOTE: Clip extremes: for <3 matches, pull hard to 0.5 (optional but recommended)
+            # mask_small = df['h2h_matches'] < 3
+            # df.loc[mask_small, 'h2h_win_share_sm'] = np.clip(
+            #     df.loc[mask_small, 'h2h_win_share_sm'], 0.4, 0.6
+            # )
+
             self.full_data[tour_name] = df
 
 
-    def h2h_feature_engineering(self):
-        for tour_name, full_df in self.full_data.items():
-            df = full_df.copy()
-            # H2H features
-            df['h2h_total'] = df['Winner_H2H_Wins'] + df['Winner_H2H_Losses']
-            df['h2h_win_rate'] = np.where(df['h2h_total'] > 0,
-                                          df['Winner_H2H_Wins'] / df['h2h_total'], 0.5)
-            df['h2h_advantage'] = df['Winner_H2H_Wins'] - df['Winner_H2H_Losses']
-
-            print('We are in h2h feature engineering')
-            # NOTE: The PTS DIFF
-
-            # print(df[['Date', 'Winner', 'Loser', 'Winner_H2H_Wins', 'Loser_H2H_Wins', 'h2h_total', 'h2h_win_rate',
-            #           'h2h_advantage', 'AbsPtsDiff', 'PtsDiff', 'HRankWins','WPts', 'LPts', 'WPTs_Ratio']].tail(10))
-
-            df = df.dropna(subset=['WRank', 'LRank'])
-            X = df[['Pts_Ratio', 'h2h_win_rate']]
-            y = df['HRankWins']  # 1 if higher-ranked player won
-            model = LogisticRegression()
-
-            split_idx = int(len(df) * 0.8)
-
-            X_train = X[:split_idx]
-            X_test = X[split_idx:]
-            y_train = y[:split_idx]
-            y_test = y[split_idx:]
-
-
-            # Train-test split (80/20)
-            model.fit(X_train, y_train)
-            X_test = df[['Pts_Ratio', 'h2h_win_rate']]
-            df['Prob_HRankWins'] = model.predict_proba(X_test)[:, 1]
-            print('h2h feature engineering')
-            print(df.sort_values(by=['Pts_Ratio']).tail())
-
-
-            # # Ranking features
-            # df['rank_diff'] = df['WRank'] - df['LRank']  # Negative = winner is higher ranked
-            # df['rank_ratio'] = df['LRank'] / (df['WRank'] + 1e-6)
-            # df['pts_diff'] = df['WPts'] - df['LPts']
-            # df['pts_ratio'] = df['WPts'] / (df['LPts'] + 1e-6)
-            #
-            # # Interaction features
-            # df['h2h_x_rank'] = df['h2h_advantage'] * df['rank_diff']
-            # df['h2h_x_pts'] = df['h2h_advantage'] * df['pts_diff'] / 1000
-
-
-
-
-
-
-    def ranking_construct(self, strategy='HRankWins'):
-        """Simple matches prediction methodology, either choosing the higher rank players would win,
-        or the lower rank players would win. """
-        for tour_name, test_df in self.test_data.items():
-            test_df["HRankWins"] = np.where(test_df["WRank"] < test_df['LRank'], 1, 0)
-            test_df["LRankWins"] = np.where(test_df["WRank"] > test_df['LRank'], 1, 0)
-            test_df['RankDiff'] = test_df['WRank'] - test_df['LRank']
-            test_df['PtsDiff'] = test_df['WPts'] - test_df['LPts']
-            test_df['AbsPtsDiff'] = test_df['PtsDiff'].abs()
-            test_df['Pts_Ratio'] = test_df[['WPts', 'LPts']].max(axis=1) / (test_df['WPts'] + test_df['LPts'])
-            self.test_data[tour_name] = test_df
-
-        for tour_name, train_df in self.train_data.items():
-            train_df["HRankWins"] = np.where(train_df["WRank"] < train_df['LRank'], 1, 0)
-            train_df["LRankWins"] = np.where(train_df["WRank"] > train_df['LRank'], 1, 0)
-            train_df['RankDiff'] = train_df['WRank'] - train_df['LRank']
-            train_df['PtsDiff'] = train_df['WPts'] - train_df['LPts']
-            train_df['AbsPtsDiff'] = train_df['PtsDiff'].abs()
-            train_df['Pts_Ratio'] = train_df[['WPts', 'LPts']].max(axis=1) / (train_df['WPts'] + train_df['LPts'])
-            self.train_data[tour_name] = train_df
-
-
-        # NOTE: If using full, you must create a train test split
+    def ranking_get(self):
         for tour_name, full_df in self.full_data.items():
             full_df["HRankWins"] = np.where(full_df["WRank"] < full_df['LRank'], 1, 0)
             full_df["LRankWins"] = np.where(full_df["WRank"] > full_df['LRank'], 1, 0)
@@ -283,8 +227,9 @@ class TennisDataAnalysis():
             self.full_data[tour_name] = full_df
 
 
-
-    def ranking_stats_construct(self, strategy='HRankWins'):
+    def ranking_stats(self, strategy='HRankWins',
+                      start_date=datetime.datetime(datetime.datetime.today().year, 1, 1),
+                      end_date=datetime.datetime.today()):
         """The accuracy and the profit we get if we use the ranking strategy. ranking construct must be run
         Profit: The potential profit after adopting the
          Evaluation:
@@ -300,69 +245,56 @@ class TennisDataAnalysis():
          33.7% of the variation in match outcomes is due to points difference, while 66.3% is due to other factors.
          p-value: how confident you can be that the relationship is real.
          THIS IS JUST STATS, SO NO NEED TO DO TRAIN TEST SPLIT"""
-
-        for tour_name, test_df in self.test_data.items():
-            test_df["ranking_bet_odds"] = np.where((test_df[strategy] == 1), test_df["AvgW"], test_df["AvgL"])
-            test_df["ranking_profit"] = np.where(test_df[strategy], test_df["ranking_bet_odds"] - 1, -1)
-            total_profit = test_df["ranking_profit"].sum()
-            rank_accuracy = test_df[strategy].mean() * 100
-            print(f'The potential profit for {tour_name} using {strategy} in TEST DATA is {total_profit:.2f}')
-            print(f'The accuracy for {tour_name} using {strategy} is {rank_accuracy:.2f}%')
-            corr_rank = scipy.stats.pointbiserialr(test_df['HRankWins'], test_df['RankDiff'])
-            test_df = test_df.dropna(subset=['WRank', 'LRank'])
-            print(f"{tour_name} for TEST DATA: {strategy} vs RankDiff: strength, r = {corr_rank[0]:.4f}, "
-                  f"variance, r2 = {corr_rank[0]**2:.4f}, "
-                  f"p-value = {corr_rank[1]:.4f}")
-
-            # Correlation 2: HRankWins vs PtsDiff
-            corr_pts = scipy.stats.pointbiserialr(test_df['HRankWins'], test_df['PtsDiff'])
-            print(f"{tour_name} for TEST DATA: {strategy} vs PtsDiff: strength, r = {corr_pts[0]:.4f},"
-                  f"variance, r2 =  {corr_pts[0]**2:.4f}, "
-                  f"p = {corr_pts[1]:.4f}")
-            self.test_data[tour_name] = test_df
-
-        for tour_name, train_df in self.train_data.items():
-            train_df["ranking_bet_odds"] = np.where((train_df[strategy] == 1), train_df["AvgW"], train_df["AvgL"])
-            train_df["ranking_profit"] = np.where(train_df[strategy], train_df["ranking_bet_odds"] - 1, -1)
-
-            total_profit = train_df["ranking_profit"].sum()
-            rank_accuracy = train_df[strategy].mean() * 100
-            print(f'The potential profit for {tour_name} using {strategy} in TRAIN DATA is {total_profit:.2f}')
-            print(f'The accuracy for {tour_name} using {strategy} is {rank_accuracy:.2f}%')
-            train_df = train_df.dropna(subset=['WRank', 'LRank'])
-            corr_rank = scipy.stats.pointbiserialr(train_df['HRankWins'], train_df['RankDiff'])
-            print(f"{tour_name} for TRAIN DATA: {strategy} vs RankDiff: strength, r = {corr_rank[0]:.4f}, "
-                  f"variance, r2 = {corr_rank[0]**2:.4f}, "
-                  f"p-value = {corr_rank[1]:.4f}")
-
-            # Correlation 2: HRankWins vs PtsDiff
-            corr_pts = scipy.stats.pointbiserialr(train_df['HRankWins'], train_df['PtsDiff'])
-            print(f"{tour_name} for TRAIN DATA: {strategy} vs PtsDiff: strength, r = {corr_pts[0]:.4f},"
-                  f"variance, r2 =  {corr_pts[0]**2:.4f}, "
-                  f"p = {corr_pts[1]:.4f}")
-            self.train_data[tour_name] = train_df
-
-
         for tour_name, full_df in self.full_data.items():
             full_df["ranking_bet_odds"] = np.where((full_df[strategy] == 1), full_df["AvgW"], full_df["AvgL"])
             full_df["ranking_profit"] = np.where(full_df[strategy], full_df["ranking_bet_odds"] - 1, -1)
 
-            total_profit = full_df["ranking_profit"].sum()
-            rank_accuracy = full_df[strategy].mean() * 100
-            print(f'The potential profit for {tour_name} using {strategy} in TRAIN DATA is {total_profit:.2f}')
+            # print(full_df.head())
+            df = full_df[(full_df['Date'] >= start_date) & (full_df['Date'] <= end_date)]
+
+            total_profit = df["ranking_profit"].sum()
+            rank_accuracy = df[strategy].mean() * 100
+            print(f'For ranking statistics, only looking at dates from {start_date.strftime("%Y%m%d")} to {end_date.strftime("%Y%m%d")}')
+            print(f'The potential profit for {tour_name} using {strategy} is {total_profit:.2f}')
             print(f'The accuracy for {tour_name} using {strategy} is {rank_accuracy:.2f}%')
-            full_df = full_df.dropna(subset=['WRank', 'LRank'])
-            corr_rank = scipy.stats.pointbiserialr(full_df['HRankWins'], full_df['RankDiff'])
+            df = df.dropna(subset=['WRank', 'LRank'])
+            corr_rank = scipy.stats.pointbiserialr(df['HRankWins'], df['RankDiff'])
             print(f"{tour_name} for FULL DATA: {strategy} vs RankDiff: strength, r = {corr_rank[0]:.4f}, "
                   f"variance, r2 = {corr_rank[0]**2:.4f}, "
                   f"p-value = {corr_rank[1]:.4f}")
 
             # Correlation 2: HRankWins vs PtsDiff
-            corr_pts = scipy.stats.pointbiserialr(full_df['HRankWins'], full_df['PtsDiff'])
+            corr_pts = scipy.stats.pointbiserialr(df['HRankWins'], df['PtsDiff'])
             print(f"{tour_name} for FULL DATA: {strategy} vs PtsDiff: strength, r = {corr_pts[0]:.4f},"
                   f"variance, r2 =  {corr_pts[0]**2:.4f}, "
                   f"p = {corr_pts[1]:.4f}")
             self.full_data[tour_name] = full_df
+
+
+    def model_evaluation(self):
+        for tour_name, full_df in self.full_data.items():
+            print(tour_name)
+            # NOTE: Just having a look at what's insdie the dataframe
+            # relevant_cols = ['Winner', 'Loser', 'WPts', 'LPts', 'Pts_Ratio', 'h2h_win_share_sm']
+            # part_df = full_df[relevant_cols].tail(30)
+            # print(part_df)
+            # NOTE: End of
+            X = full_df[['Pts_Ratio', 'h2h_win_share_sm']]
+            Y = full_df['HRankWins']
+            # NOTE: Tree/Ensemble Implementation
+            split_idx = int(0.8*len(full_df))
+            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+            Y_train, Y_test = Y.iloc[:split_idx], Y.iloc[split_idx:]
+            xgb = XGBClassifier(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42,
+                                eval_metric='logloss')
+            xgb.fit(X_train, Y_train)
+            xgb_proba = xgb.predict_proba(X_test)[:, 1]
+            X_test['ensemble_results'] = xgb_proba
+            print(X_test.tail(20))
+
+
+
+
 
 
     def model_fitting(self, feature_cols, target_variable, confidence_level=0.6):
@@ -410,6 +342,12 @@ class TennisDataAnalysis():
 
     def run_analysis(self):
         self.h2h_get()
+        self.h2h_feature()
+        self.ranking_get()
+        self.ranking_stats()
+        self.model_evaluation()
+
+
         # self.ranking_construct()
         # self.h2h_feature_engineering()
         # self.ranking_stats_construct()
