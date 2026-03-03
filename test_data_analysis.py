@@ -40,6 +40,7 @@ class TennisDataAnalysis():
         }
 
     def elo_construct(self, elo_start_date=datetime.date.today() - relativedelta(years=1), initial_elo=1500, k=40):
+        # NOTE: We are not currently looking at Elo
         """Elo Construction based on Own Criteria.
          elo_start_date:
             we already have past full year matches data, indicate when you want to elo to be calculated.
@@ -155,6 +156,7 @@ class TennisDataAnalysis():
 
 
     def h2h_get(self):
+        # NOTE: Currently using
         """
         Add pre-match head-to-head features to tennis match dataframe.
 
@@ -199,7 +201,9 @@ class TennisDataAnalysis():
             self.full_data[tour_name] = df
 
     def h2h_feature(self):
+        # NOTE: This is to create feature that's relevant to h2h
         print('We are now in h2h_feature')
+        # NOTE: New feature: I should create a timed adjused h2h
         for tour_name, full_df in self.full_data.items():
             df = full_df.copy()
             df['h2h_matches'] = df['Winner_H2H_Wins'].fillna(0) + df['Loser_H2H_Wins'].fillna(0)
@@ -217,6 +221,7 @@ class TennisDataAnalysis():
 
 
     def ranking_get(self):
+        # NOTE: This should be self explanator
         for tour_name, full_df in self.full_data.items():
             full_df["HRankWins"] = np.where(full_df["WRank"] < full_df['LRank'], 1, 0)
             full_df["LRankWins"] = np.where(full_df["WRank"] > full_df['LRank'], 1, 0)
@@ -272,6 +277,7 @@ class TennisDataAnalysis():
 
 
     def model_evaluation(self):
+        """"""
         for tour_name, full_df in self.full_data.items():
             print(tour_name)
             # NOTE: Just having a look at what's insdie the dataframe
@@ -279,7 +285,9 @@ class TennisDataAnalysis():
             # part_df = full_df[relevant_cols].tail(30)
             # print(part_df)
             # NOTE: End of
-            X = full_df[['Pts_Ratio', 'h2h_win_share_sm']]
+            # NOTE: Some dataprep
+            # full_df['WPtsRatio'] = full_df['WPts'] / (full_df['WPts'] + full_df['LPts'])
+            X = full_df[['AbsPtsDiff', 'h2h_win_share_sm']]
             Y = full_df['HRankWins']
             # NOTE: Tree/Ensemble Implementation
             split_idx = int(0.8*len(full_df))
@@ -290,7 +298,18 @@ class TennisDataAnalysis():
             xgb.fit(X_train, Y_train)
             xgb_proba = xgb.predict_proba(X_test)[:, 1]
             X_test['ensemble_results'] = xgb_proba
-            print(X_test.tail(20))
+            print(full_df.tail())
+            print(X_test.tail())
+            evaluate_df = pd.merge(full_df[['Tournament', 'Date', 'Round', 'Winner', 'Loser', 'WRank', 'LRank',
+                                            'WPts', 'LPts', 'AvgW', 'AvgL', 'Winner_H2H_Wins', 'Loser_H2H_Wins',
+                                            'h2h_matches', 'h2h_win_share_sm', 'AbsPtsDiff',  'Pts_Ratio',
+                                            ]], X_test[['ensemble_results']], left_index=True, right_index=True)
+            evaluate_df = evaluate_df[evaluate_df['h2h_matches'] > 0]
+            evaluate_df["ensemble_profit"] = np.where(evaluate_df['ensemble_results'] > 0.5, evaluate_df["AvgW"] - 1, -1)
+            # evaluate_df = evaluate_df['ensemble_results']
+            print(evaluate_df)
+            print(evaluate_df['ensemble_profit'].sum())
+
 
 
 
