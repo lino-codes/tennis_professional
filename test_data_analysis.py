@@ -8,8 +8,14 @@ from collections import defaultdict
 from dateutil.relativedelta import relativedelta
 from sklearn.model_selection import train_test_split
 
+from constants import relevant_columns
 from test_df_helper import pandas_show_all
 from sklearn.linear_model import LogisticRegression
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
 from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 
@@ -38,6 +44,10 @@ class TennisDataAnalysis():
                 ignore_index=True
             ),
         }
+
+        # NOTE: Temporary data for better visualisation
+        self.temp_data = {'atp': self.full_data['atp'][relevant_columns],
+                          'wta': self.full_data['wta'][relevant_columns]}
 
     def elo_construct(self, elo_start_date=datetime.date.today() - relativedelta(years=1), initial_elo=1500, k=40):
         # NOTE: We are not currently looking at Elo
@@ -204,7 +214,9 @@ class TennisDataAnalysis():
         # NOTE: This is to create feature that's relevant to h2h
         print('We are now in h2h_feature')
         # NOTE: New feature: I should create a timed adjused h2h
+
         for tour_name, full_df in self.full_data.items():
+            print(tour_name)
             df = full_df.copy()
             df['h2h_matches'] = df['Winner_H2H_Wins'].fillna(0) + df['Loser_H2H_Wins'].fillna(0)
             alpha = 1.0  # Pseudocount (standard Laplace)
@@ -216,9 +228,83 @@ class TennisDataAnalysis():
             # df.loc[mask_small, 'h2h_win_share_sm'] = np.clip(
             #     df.loc[mask_small, 'h2h_win_share_sm'], 0.4, 0.6
             # )
-
             self.full_data[tour_name] = df
 
+    def h2h_feature_test(self):
+        """This is to generate the different h2h features using temp data"""
+        for tour_name, temp_df in self.temp_data.items():
+            for col in ["WRank", "LRank", "WPts", "LPts"]:
+                temp_df[col] = pd.to_numeric(temp_df[col], errors='coerce')
+
+            temp_df = temp_df.dropna(subset=['WRank', 'LRank', 'WPts', 'LPts']) # drop if any relevant role is nan
+            # replace any potential zeros to avoid log issues
+            temp_df["WRank"] = temp_df["WRank"].clip(lower=1.0)
+            temp_df["LRank"] = temp_df["LRank"].clip(lower=1.0)
+            temp_df["WPts"] = temp_df["WPts"].clip(lower=0.0)
+            temp_df["LPts"] = temp_df["LPts"].clip(lower=0.0)
+            # NOTE: End of dataframe cleaning
+            # NOW applying log
+            def build_pairwise_rows(row):
+                a1 = -np.log(row["WRank"]) # NOTE: Unsure what these are
+                b1 = np.log(row["WPts"] + 1.0)
+                a2 = -np.log(row["LRank"])
+                b2 = np.log(row["LPts"] + 1.0)
+
+                r_win = {
+                    "a_rank_logneg": a1,
+                    "a_pts_log": b1,
+                    "b_rank_logneg": a2,
+                    "b_pts_log": b2,
+                    "y": 1
+                }
+
+                r_lose = {
+                    "a_rank_logneg": a2,
+                    "a_pts_log": b2,
+                    "b_rank_logneg": a1,
+                    "b_pts_log": b1,
+                    "y": 0
+                }
+                return pd.DataFrame([r_win, r_lose])
+
+            train_rows = []
+            for _, row in temp_df.iterrows():
+                train_rows.append(build_pairwise_rows(row))
+
+            train_df = pd.concat(train_rows, ignore_index=True)
+
+            # Feature matrix: we'll let the model learn the combination:
+            # rank_feature_A - rank_feature_B is effectively a linear combination if we use:
+            # X = [a_rank_logneg - b_rank_logneg, a_pts_log - b_pts_log]
+
+            train_df["d_ranklog"] = train_df["a_rank_logneg"] - train_df["b_rank_logneg"]
+            train_df["d_ptslog"] = train_df["a_pts_log"] - train_df["b_pts_log"]
+
+            X = train_df[["d_ranklog", "d_ptslog"]].values
+            y = train_df["y"].values
+
+            # Fitting a calibrated logistic model
+
+            pipe = Pipeline([
+                ("scaler", StandardScaler(with_mean=True, with_std=True)),
+                ("logreg", LogisticRegression(solver="lbfgs"))
+            ])
+            pipe.fit(X, y)
+
+            # ------------------------------------------------------------
+            d_ranklog = -np.log(temp_df["WRank"]) - (-np.log(temp_df["LRank"]))  # = -log(WRank) + log(LRank)
+            d_ptslog = np.log(temp_df["WPts"] + 1.0) - np.log(temp_df["LPts"] + 1.0)
+
+            X_eval = np.c_[d_ranklog.values, d_ptslog.values]
+            p_winner = pipe.predict_proba(X_eval)[:, 1]  # probability A (winner) wins
+
+            temp_df["p_winner"] = p_winner
+            print('let looks at results')
+            evaluate_df = temp_df.copy()
+            # evaluate_df["expected_gain"] = np.where(evaluate_df['p_winner'] > 0.5, evaluate_df["AvgW"] - 1, -1)
+            print(evaluate_df.head(10))
+            print(evaluate_df.tail(10))
+            # print(evaluate_df.expected_gain.sum())
 
     def ranking_get(self):
         # NOTE: This should be self explanator
@@ -316,6 +402,8 @@ class TennisDataAnalysis():
 
 
 
+
+
     def model_fitting(self, feature_cols, target_variable, confidence_level=0.6):
         # NOTE: This is using the full year data as training data,
         print('We are in the model fitting phase')
@@ -361,10 +449,10 @@ class TennisDataAnalysis():
 
     def run_analysis(self):
         self.h2h_get()
-        self.h2h_feature()
-        self.ranking_get()
-        self.ranking_stats()
-        self.model_evaluation()
+        self.h2h_feature_test()
+        # self.ranking_get()
+        # self.ranking_stats()
+        # self.model_evaluation()
 
 
         # self.ranking_construct()
