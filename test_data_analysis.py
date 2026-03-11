@@ -22,13 +22,19 @@ from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 
 pandas_show_all()
 
-# NOTE:
+# TODO: Clean up function one by one
+
+
 class TennisDataAnalysis():
     def __init__(self):
         self.today_str = datetime.date.today().strftime('%Y%m%d')
         # NOTE: train data: referring to the full year training data
-        self.train_data = {'atp': pd.read_excel(f'./data/atp_tennis-data_20251231.xlsx'),
-                            'wta': pd.read_excel(f'./data/wta_tennis-data_20251231.xlsx')}
+        # self.train_data = {'atp': pd.read_excel(f'./data/atp_tennis-data_20251231.xlsx'),
+        #                     'wta': pd.read_excel(f'./data/wta_tennis-data_20251231.xlsx')}
+
+        self.train_data = {'atp': pd.read_excel(f'./data/atp_tennis-data_2024-2025.xlsx', index_col=0),
+                            'wta': pd.read_excel(f'./data/wta_tennis-data_2024-2025.xlsx', index_col=0)}
+
 
         # NOTE: test_data: data we are used to evaluate prediction strategy
         self.test_data = {'atp': pd.read_excel(f'./data/atp_tennis-data_{self.today_str}.xlsx'),
@@ -46,8 +52,10 @@ class TennisDataAnalysis():
         }
 
         # NOTE: Temporary data for better visualisation
-        self.temp_data = {'atp': self.full_data['atp'][relevant_columns],
-                          'wta': self.full_data['wta'][relevant_columns]}
+        # self.temp_data = {'atp': self.full_data['atp'][relevant_columns],
+        #                   'wta': self.full_data['wta'][relevant_columns]}
+        self.temp_data = {'atp': self.full_data['atp'],
+                          'wta': self.full_data['wta']}
 
     def elo_construct(self, elo_start_date=datetime.date.today() - relativedelta(years=1), initial_elo=1500, k=40):
         # NOTE: We are not currently looking at Elo
@@ -165,6 +173,85 @@ class TennisDataAnalysis():
             self.full_data[tour_name] = tour_df
 
 
+    def get_rank_feature(self):
+        print('GET Rank Features')
+        for tour_name, temp_df in self.full_data.items():
+            for col in ["WRank", "LRank", "WPts", "LPts"]:
+                temp_df[col] = pd.to_numeric(temp_df[col], errors='coerce')
+
+            temp_df = temp_df.dropna(subset=['WRank', 'LRank', 'WPts', 'LPts']) # drop if any relevant role is nan
+            print(temp_df.columns)
+            # replace any potential zeros to avoid log issues
+            temp_df["WRank"] = temp_df["WRank"].clip(lower=1.0)
+            temp_df["LRank"] = temp_df["LRank"].clip(lower=1.0)
+            temp_df["WPts"] = temp_df["WPts"].clip(lower=0.0)
+            temp_df["LPts"] = temp_df["LPts"].clip(lower=0.0)
+            # NOTE: End of dataframe cleaning
+            # NOTE: NOW applying log
+            def build_pairwise_rows(row):
+                a1 = -np.log(row["WRank"]) # NOTE: Unsure what these are
+                b1 = np.log(row["WPts"] + 1.0)
+                a2 = -np.log(row["LRank"])
+                b2 = np.log(row["LPts"] + 1.0)
+
+                r_win = {
+                    "a_rank_logneg": a1,
+                    "a_pts_log": b1,
+                    "b_rank_logneg": a2,
+                    "b_pts_log": b2,
+                    "y": 1
+                }
+
+                r_lose = {
+                    "a_rank_logneg": a2,
+                    "a_pts_log": b2,
+                    "b_rank_logneg": a1,
+                    "b_pts_log": b1,
+                    "y": 0
+                }
+                return pd.DataFrame([r_win, r_lose])
+            train_rows = []
+            for _, row in temp_df.iterrows():
+                train_rows.append(build_pairwise_rows(row)) # each pair is the same match, one is a winning row,
+                # the other is losing row
+
+            train_df = pd.concat(train_rows, ignore_index=True)
+
+            # Feature matrix: we'll let the model learn the combination:
+            # rank_feature_A - rank_feature_B is effectively a linear combination if we use:
+            # X = [a_rank_logneg - b_rank_logneg, a_pts_log - b_pts_log]
+
+            train_df["d_ranklog"] = train_df["a_rank_logneg"] - train_df["b_rank_logneg"]
+            train_df["d_ptslog"] = train_df["a_pts_log"] - train_df["b_pts_log"]
+
+            X = train_df[["d_ranklog", "d_ptslog"]].values
+            y = train_df["y"].values
+
+            # Fitting a calibrated logistic model
+
+            pipe = Pipeline([
+                ("scaler", StandardScaler(with_mean=True, with_std=True)),
+                ("logreg", LogisticRegression(solver="lbfgs"))
+            ])
+            # NOTE: Step 1: fits on training data to compute per feature mean and std,
+            #  transforms in puts to zero mean, unit variance so features are on comparable scales
+            # NOTE: Step 2: logistics regression trains a logistic regression classifier on the scaled features
+            # Uses l2 regularisation by default, lbfgs is a stable,
+
+            pipe.fit(X, y)
+
+            # ------------------------------------------------------------
+            d_ranklog = -np.log(temp_df["WRank"]) - (-np.log(temp_df["LRank"]))  # = -log(WRank) + log(LRank)
+            d_ptslog = np.log(temp_df["WPts"] + 1.0) - np.log(temp_df["LPts"] + 1.0)
+
+            X_eval = np.c_[d_ranklog.values, d_ptslog.values]
+            p_winner = pipe.predict_proba(X_eval)[:, 1]  # probability A (winner) wins
+
+            temp_df["p_rank_feature_winner"] = p_winner # predicted probability of the winning player winning
+
+            self.full_data[tour_name] = temp_df
+
+
     def h2h_get(self):
         # NOTE: Currently using
         """
@@ -230,81 +317,49 @@ class TennisDataAnalysis():
             # )
             self.full_data[tour_name] = df
 
-    def h2h_feature_test(self):
-        """This is to generate the different h2h features using temp data"""
-        for tour_name, temp_df in self.temp_data.items():
-            for col in ["WRank", "LRank", "WPts", "LPts"]:
-                temp_df[col] = pd.to_numeric(temp_df[col], errors='coerce')
 
-            temp_df = temp_df.dropna(subset=['WRank', 'LRank', 'WPts', 'LPts']) # drop if any relevant role is nan
-            # replace any potential zeros to avoid log issues
-            temp_df["WRank"] = temp_df["WRank"].clip(lower=1.0)
-            temp_df["LRank"] = temp_df["LRank"].clip(lower=1.0)
-            temp_df["WPts"] = temp_df["WPts"].clip(lower=0.0)
-            temp_df["LPts"] = temp_df["LPts"].clip(lower=0.0)
-            # NOTE: End of dataframe cleaning
-            # NOW applying log
-            def build_pairwise_rows(row):
-                a1 = -np.log(row["WRank"]) # NOTE: Unsure what these are
-                b1 = np.log(row["WPts"] + 1.0)
-                a2 = -np.log(row["LRank"])
-                b2 = np.log(row["LPts"] + 1.0)
-
-                r_win = {
-                    "a_rank_logneg": a1,
-                    "a_pts_log": b1,
-                    "b_rank_logneg": a2,
-                    "b_pts_log": b2,
-                    "y": 1
-                }
-
-                r_lose = {
-                    "a_rank_logneg": a2,
-                    "a_pts_log": b2,
-                    "b_rank_logneg": a1,
-                    "b_pts_log": b1,
-                    "y": 0
-                }
-                return pd.DataFrame([r_win, r_lose])
-
-            train_rows = []
-            for _, row in temp_df.iterrows():
-                train_rows.append(build_pairwise_rows(row))
-
-            train_df = pd.concat(train_rows, ignore_index=True)
-
-            # Feature matrix: we'll let the model learn the combination:
-            # rank_feature_A - rank_feature_B is effectively a linear combination if we use:
-            # X = [a_rank_logneg - b_rank_logneg, a_pts_log - b_pts_log]
-
-            train_df["d_ranklog"] = train_df["a_rank_logneg"] - train_df["b_rank_logneg"]
-            train_df["d_ptslog"] = train_df["a_pts_log"] - train_df["b_pts_log"]
-
-            X = train_df[["d_ranklog", "d_ptslog"]].values
-            y = train_df["y"].values
-
-            # Fitting a calibrated logistic model
-
-            pipe = Pipeline([
-                ("scaler", StandardScaler(with_mean=True, with_std=True)),
-                ("logreg", LogisticRegression(solver="lbfgs"))
-            ])
-            pipe.fit(X, y)
-
-            # ------------------------------------------------------------
-            d_ranklog = -np.log(temp_df["WRank"]) - (-np.log(temp_df["LRank"]))  # = -log(WRank) + log(LRank)
-            d_ptslog = np.log(temp_df["WPts"] + 1.0) - np.log(temp_df["LPts"] + 1.0)
-
-            X_eval = np.c_[d_ranklog.values, d_ptslog.values]
-            p_winner = pipe.predict_proba(X_eval)[:, 1]  # probability A (winner) wins
-
-            temp_df["p_winner"] = p_winner
-            print('let looks at results')
+    def rank_feature_validation(self):
+        for tour_name, temp_df in self.full_data.items():
             evaluate_df = temp_df.copy()
             # evaluate_df["expected_gain"] = np.where(evaluate_df['p_winner'] > 0.5, evaluate_df["AvgW"] - 1, -1)
-            print(evaluate_df.head(10))
-            print(evaluate_df.tail(10))
-            # print(evaluate_df.expected_gain.sum())
+
+            # NOTE: Check if the probability beats the Bet365 Odds and set Confidence level, the higher it is, the bigger the discrepancy between our prediction and betting odds
+            disc_level = 0.2
+            realistic_level = 5
+            book_fav = 'B365'
+
+            # these are inplace to avoid errors
+            evaluate_df = evaluate_df[~evaluate_df[f"{book_fav}W"].apply(lambda x: isinstance(x, str))]
+            evaluate_df = evaluate_df[evaluate_df[f'{book_fav}W'] > 0]
+
+            evaluate_df["implied_W"] = 1 / evaluate_df[f"{book_fav}W"] # the implied probability of winning
+            evaluate_df["implied_L"] = 1 / evaluate_df[f"{book_fav}L"]
+
+            evaluate_df["p_rank_feature_loser"] = 1 - evaluate_df["p_rank_feature_winner"] # predicted probability of the winning player winning
+
+            self.full_data[tour_name] = evaluate_df
+            # NOTE: To spot the betting opportunity
+            evaluate_df["winner_margin"] = evaluate_df["p_rank_feature_winner"] - evaluate_df["implied_W"]
+            evaluate_df["loser_margin"] = evaluate_df["p_rank_feature_loser"] - evaluate_df["implied_L"]
+
+            winning_df = evaluate_df[(evaluate_df["winner_margin"] > disc_level)
+                                  & (evaluate_df[f"{book_fav}W"] < realistic_level)]
+
+            losing_df = evaluate_df[(evaluate_df["loser_margin"] > disc_level)
+                                  & (evaluate_df[f"{book_fav}L"] < realistic_level)]
+
+
+            winning_df['winning_money'] = winning_df[f'{book_fav}W'] - 1
+            print(f'Tour Name: {tour_name}')
+            print(f'Winning Money: {winning_df["winning_money"].sum()}')
+            print(f'Losing Money: {len(losing_df)}')
+            # print(winning_df.sort_values(f'{book_fav}W', ascending=False)[relevant_columns].head(15))
+            # print(winning_df.sort_values(f'{book_fav}W', ascending=False).head())
+
+            # print(evaluate_df[(evaluate_df["EV_winner"] > disc_level)].head())
+            # print(evaluate_df[(evaluate_df["EV_loser"] > disc_level)].head())
+
+
 
     def ranking_get(self):
         # NOTE: This should be self explanator
@@ -397,13 +452,6 @@ class TennisDataAnalysis():
             print(evaluate_df['ensemble_profit'].sum())
 
 
-
-
-
-
-
-
-
     def model_fitting(self, feature_cols, target_variable, confidence_level=0.6):
         # NOTE: This is using the full year data as training data,
         print('We are in the model fitting phase')
@@ -433,9 +481,6 @@ class TennisDataAnalysis():
         # NOTE: End of data
 
 
-
-
-
     def elo_strategy(self, strategy='HEloWins'):
         for tour_name, tour_df in self.tennis_data.items():
             tour_df["elo_bet_odds"] = np.where((tour_df[strategy] == 1), tour_df["AvgW"], tour_df["AvgL"])
@@ -447,9 +492,147 @@ class TennisDataAnalysis():
             #                'PreLEloCount',  'HEloWins',  'LEloWins',  'elo_bet_odds',  'elo_profit']])
             print(f"Total elo profit for {tour_name}: {total_profit}")\
 
+
+
+    def get_h2h_feature(self):
+        def unordered_pair(a, b):
+            return tuple(sorted([a, b]))
+
+        def cumulative_wins_prior(df, key_col, winner_role_col):
+            """
+            df: sorted by Date
+            key_col: 'ordered_key_w' or 'ordered_key_l'
+            winner_role_col: boolean/0-1 indicator whether the first element of key won
+            """
+            # Build a frame with the ordered key and "did_first_win"
+            tmp = df[[key_col]].copy()
+            tmp['did_first_win'] = df[winner_role_col].astype(int)
+
+            # Group by pair, build cumulative sum and then shift to represent "prior"
+            tmp['cum_wins'] = tmp.groupby(key_col)['did_first_win'].cumsum()
+            tmp['cum_wins_prior'] = tmp.groupby(key_col)['cum_wins'].shift(fill_value=0)
+            tmp['cum_matches'] = tmp.groupby(key_col).cumcount()  # prior matches count
+
+            return tmp[['cum_wins_prior', 'cum_matches']]
+
+
+        for tour_name, temp_df in self.full_data.items():
+            temp_df['pair_key'] = [unordered_pair(w, l) for w, l in zip(temp_df['Winner'], temp_df['Loser'])]
+            temp_df['ordered_key_w'] = list(zip(temp_df['Winner'], temp_df['Loser']))  # winner perspective
+            temp_df['ordered_key_l'] = list(zip(temp_df['Loser'], temp_df['Winner']))  # loser perspective
+
+            # Sort by date to build leakage-free cumulative stats
+            temp_df = temp_df.sort_values(['Date']).reset_index(drop=True)
+            # print(temp_df.head())
+
+            temp_df['did_first_win_w'] = 1
+
+            # For loser perspective: ordered_key_l = (Loser, Winner)
+            # The "first" player in ordered_key_l is the match loser, so did_first_win = 0 for every row.
+            temp_df['did_first_win_l'] = 0
+
+            # Compute prior cumulative wins for winner->loser
+            w_stats = cumulative_wins_prior(temp_df, 'ordered_key_w', 'did_first_win_w')
+            l_stats = cumulative_wins_prior(temp_df, 'ordered_key_l', 'did_first_win_l')
+
+            # Attach to df
+            temp_df[['h2h_wins_w_prior', 'h2h_matches_w_prior']] = w_stats.values
+            temp_df[['h2h_wins_l_prior', 'h2h_matches_l_prior']] = l_stats.values
+
+            # Sanity: for an unordered pair, prior total matches is the same from either side
+            temp_df['h2h_total_prior'] = temp_df['Winner_H2H_Wins'] + temp_df['Loser_H2H_Wins']
+            temp_df['is_first_meeting'] = (temp_df['h2h_total_prior'] == 0).astype(int)
+
+
+            # Beta prior parameters (tunable). Start with a mild prior: alpha=beta=1 or 2.
+            alpha_prior = 1.5
+            beta_prior = 1.5
+
+            # Winner's smoothed H2H win rate vs this opponent prior to the match
+            # temp_df['h2h_win_pct_w_smooth'] = (
+            #         (temp_df['h2h_wins_w_prior'] + alpha_prior) /
+            #         (temp_df['h2h_total_prior'] + alpha_prior + beta_prior).replace(0, np.nan)
+            # ).fillna(0.5)  # if no prior matches, prior mean = alpha/(alpha+beta) = 0.5
+            #
+            # # Loser's smoothed H2H win rate vs this opponent prior to the match
+            # temp_df['h2h_win_pct_l_smooth'] = (
+            #         (temp_df['h2h_wins_l_prior'] + alpha_prior) /
+            #         (temp_df['h2h_total_prior'] + alpha_prior + beta_prior).replace(0, np.nan)
+            # ).fillna(0.5)
+
+
+            temp_df['h2h_win_pct_w_smooth'] = (
+                    (temp_df['Winner_H2H_Wins'] + alpha_prior) /
+                    (temp_df['h2h_total_prior'] + alpha_prior + beta_prior).replace(0, np.nan)
+            ).fillna(0.5)  # if no prior matches, prior mean = alpha/(alpha+beta) = 0.5
+
+            # Loser's smoothed H2H win rate vs this opponent prior to the match
+            temp_df['h2h_win_pct_l_smooth'] = (
+                    (temp_df['Loser_H2H_Wins'] + alpha_prior) /
+                    (temp_df['h2h_total_prior'] + alpha_prior + beta_prior).replace(0, np.nan)
+            ).fillna(0.5)
+
+            # Optional: relative H2H tendency (centered)
+            temp_df['h2h_w_relative_w'] = temp_df['h2h_win_pct_w_smooth'] - 0.5
+            temp_df['h2h_w_relative_l'] = temp_df['h2h_win_pct_l_smooth'] - 0.5
+            #
+            #
+            # print(temp_df[(temp_df['Winner_H2H_Wins'] > 0) & (temp_df['Loser_H2H_Wins'] > 0)][relevant_columns].tail(10))
+            # print(temp_df[(temp_df['Winner_H2H_Wins'] == 0) & (temp_df['Loser_H2H_Wins'] == 0)][relevant_columns].tail(10))
+
+            self.full_data[tour_name] = temp_df
+
+
+
+    def h2h_feature_validation(self):
+        for tour_name, temp_df in self.full_data.items():
+            evaluate_df = temp_df.copy()
+            # evaluate_df["expected_gain"] = np.where(evaluate_df['p_winner'] > 0.5, evaluate_df["AvgW"] - 1, -1)
+
+            # NOTE: Check if the probability beats the Bet365 Odds and set Confidence level, the higher it is, the bigger the discrepancy between our prediction and betting odds
+            disc_level = 0.2
+            realistic_level = 5
+
+            h2h_total = 1
+            book_fav = 'B365'
+
+            evaluate_df['p_h2h_feature_winner'] = evaluate_df['h2h_win_pct_w_smooth']
+            evaluate_df['p_h2h_feature_loser'] = evaluate_df['h2h_win_pct_l_smooth']
+
+            evaluate_df = evaluate_df[evaluate_df['is_first_meeting'] != 1]
+            evaluate_df["winner_margin"] = evaluate_df["p_h2h_feature_winner"] - evaluate_df["implied_W"]
+            evaluate_df["loser_margin"] = evaluate_df["p_h2h_feature_loser"] - evaluate_df["implied_L"]
+
+
+            winning_df = evaluate_df[(evaluate_df["winner_margin"] > disc_level)
+                                     & (evaluate_df[f"{book_fav}W"] < realistic_level)
+                                     & (evaluate_df[f"h2h_total_prior"] >= h2h_total)
+                                     ]
+
+            losing_df = evaluate_df[(evaluate_df["loser_margin"] > disc_level)
+                                    & (evaluate_df[f"{book_fav}L"] < realistic_level)
+            & (evaluate_df[f"h2h_total_prior"] >= h2h_total)]
+
+            winning_df['winning_money'] = winning_df[f'{book_fav}W'] - 1
+            print(f'Tour Name: {tour_name}')
+            print(f'Winning Money: {winning_df["winning_money"].sum()}')
+            print(f'Losing Money: {len(losing_df)}')
+            print(winning_df[relevant_columns].tail())
+            print(losing_df[relevant_columns].tail())
+
+
+
+
+
     def run_analysis(self):
         self.h2h_get()
-        self.h2h_feature_test()
+
+        self.get_rank_feature()
+        self.rank_feature_validation()
+        self.get_h2h_feature()
+        self.h2h_feature_validation()
+
+        # self.h2h_feature_test()
         # self.ranking_get()
         # self.ranking_stats()
         # self.model_evaluation()
