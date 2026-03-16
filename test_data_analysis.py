@@ -6,7 +6,7 @@ from scipy.stats import spearmanr
 from pathlib import Path
 from collections import defaultdict
 from dateutil.relativedelta import relativedelta
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, TimeSeriesSplit
 
 from constants import relevant_columns
 from test_df_helper import pandas_show_all
@@ -17,8 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
 from xgboost import XGBClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
-
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, log_loss, brier_score_loss
 
 pandas_show_all()
 
@@ -517,9 +516,9 @@ class TennisDataAnalysis():
 
 
         for tour_name, temp_df in self.full_data.items():
-            temp_df['pair_key'] = [unordered_pair(w, l) for w, l in zip(temp_df['Winner'], temp_df['Loser'])]
-            temp_df['ordered_key_w'] = list(zip(temp_df['Winner'], temp_df['Loser']))  # winner perspective
-            temp_df['ordered_key_l'] = list(zip(temp_df['Loser'], temp_df['Winner']))  # loser perspective
+            # temp_df['pair_key'] = [unordered_pair(w, l) for w, l in zip(temp_df['Winner'], temp_df['Loser'])]
+            # temp_df['ordered_key_w'] = list(zip(temp_df['Winner'], temp_df['Loser']))  # winner perspective
+            # temp_df['ordered_key_l'] = list(zip(temp_df['Loser'], temp_df['Winner']))  # loser perspective
 
             # Sort by date to build leakage-free cumulative stats
             temp_df = temp_df.sort_values(['Date']).reset_index(drop=True)
@@ -532,12 +531,12 @@ class TennisDataAnalysis():
             temp_df['did_first_win_l'] = 0
 
             # Compute prior cumulative wins for winner->loser
-            w_stats = cumulative_wins_prior(temp_df, 'ordered_key_w', 'did_first_win_w')
-            l_stats = cumulative_wins_prior(temp_df, 'ordered_key_l', 'did_first_win_l')
+            # w_stats = cumulative_wins_prior(temp_df, 'ordered_key_w', 'did_first_win_w')
+            # l_stats = cumulative_wins_prior(temp_df, 'ordered_key_l', 'did_first_win_l')
 
             # Attach to df
-            temp_df[['h2h_wins_w_prior', 'h2h_matches_w_prior']] = w_stats.values
-            temp_df[['h2h_wins_l_prior', 'h2h_matches_l_prior']] = l_stats.values
+            # temp_df[['h2h_wins_w_prior', 'h2h_matches_w_prior']] = w_stats.values
+            # temp_df[['h2h_wins_l_prior', 'h2h_matches_l_prior']] = l_stats.values
 
             # Sanity: for an unordered pair, prior total matches is the same from either side
             temp_df['h2h_total_prior'] = temp_df['Winner_H2H_Wins'] + temp_df['Loser_H2H_Wins']
@@ -599,6 +598,8 @@ class TennisDataAnalysis():
             evaluate_df['p_h2h_feature_winner'] = evaluate_df['h2h_win_pct_w_smooth']
             evaluate_df['p_h2h_feature_loser'] = evaluate_df['h2h_win_pct_l_smooth']
 
+            self.full_data[tour_name] = evaluate_df.copy()
+
             evaluate_df = evaluate_df[evaluate_df['is_first_meeting'] != 1]
             evaluate_df["winner_margin"] = evaluate_df["p_h2h_feature_winner"] - evaluate_df["implied_W"]
             evaluate_df["loser_margin"] = evaluate_df["p_h2h_feature_loser"] - evaluate_df["implied_L"]
@@ -617,20 +618,116 @@ class TennisDataAnalysis():
             print(f'Tour Name: {tour_name}')
             print(f'Winning Money: {winning_df["winning_money"].sum()}')
             print(f'Losing Money: {len(losing_df)}')
-            print(winning_df[relevant_columns].tail())
-            print(losing_df[relevant_columns].tail())
 
 
+    def all_features_validation(self):
+        def build_ab(df):
+            # df has winner/loser oriented columns
+            a = pd.DataFrame({
+                'Date': df['Date'],
+                'A': df['Winner'],
+                'B': df['Loser'],
+                'p_rank_A': df['p_rank_feature_winner'],
+                'p_h2h_A': df['p_h2h_feature_winner'],
+                'h2h_total_prior': df[ 'h2h_total_prior'],
+                'is_first_meeting': df['is_first_meeting'],
+                'y': 1
+            })
+            b = pd.DataFrame({
+                'Date': df['Date'],
+                'A': df['Loser'],
+                'B': df['Winner'],
+                'p_rank_A': df['p_rank_feature_loser'],
+                'p_h2h_A': df['p_h2h_feature_loser'],
+                'h2h_total_prior': df['h2h_total_prior'],
+                'is_first_meeting': df['is_first_meeting'],
+                'y': 0
+            })
+            ab = pd.concat([a, b], ignore_index=True).sort_values('Date').reset_index(drop=True)
+            return ab
+
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+
+        def train_meta_logit(df_ab, add_context=True):
+            df_ab = df_ab.sort_values('Date').reset_index(drop=True).copy()
+
+            # Base inputs as logits
+            x_rank = logit(df_ab['p_rank_A'].to_numpy())
+            x_h2h = logit(df_ab['p_h2h_A'].to_numpy())
+            X = np.column_stack([x_rank, x_h2h])
+
+            # Optional context features (the meta can learn when to trust H2H more/less)
+            ctx_cols = []
+            if add_context:
+                for col in ['h2h_total_prior', 'is_first_meeting']:
+                    if col in df_ab.columns:
+                        ctx_cols.append(col)
+                if ctx_cols:
+                    X = np.column_stack([X, df_ab[ctx_cols].to_numpy()])
+                    # print('Context Feature')
+                    # print(X)
+
+            # print('Without Context Feature')
+            # print(X)
+            y = df_ab['y'].to_numpy()
+            tscv = TimeSeriesSplit(n_splits=5)
+
+            # Cross-validated evaluation
+            oof = np.zeros(len(df_ab))
+            for tr, va in tscv.split(X, y):
+                model = LogisticRegression(max_iter=500, solver='lbfgs')
+                model.fit(X[tr], y[tr])
+                oof[va] = model.predict_proba(X[va])[:, 1]
+            metrics = {
+                'log_loss': log_loss(y, np.clip(oof, 1e-6, 1 - 1e-6)),
+                'brier': brier_score_loss(y, oof),
+                'roc_auc': roc_auc_score(y, oof)
+            }
+
+            # Fit final model on all data for deployment
+            final_model = LogisticRegression(max_iter=500, solver='lbfgs')
+            final_model.fit(X, y)
+
+            return final_model, ctx_cols, metrics
+
+        def predict_meta_logit(model, df_ab, ctx_cols):
+            x_rank = logit(df_ab['p_rank_A'].to_numpy())
+            x_h2h = logit(df_ab['p_h2h_A'].to_numpy())
+            X = np.column_stack([x_rank, x_h2h])
+            if ctx_cols:
+                X = np.column_stack([X, df_ab[ctx_cols].to_numpy()])
+            return pd.Series(model.predict_proba(X)[:, 1], index=df_ab.index, name='p_final_A')
+
+        for tour_name, temp_df in self.full_data.items():
+            print(f'Tour name being {tour_name}')
+            df_ab = build_ab(temp_df)
+
+            meta_model, ctx_cols, cv_metrics = train_meta_logit(df_ab, add_context=True)
+            print('CV metrics:', cv_metrics)
+
+            # 3) Inference on the same or future matches (A perspective)
+            df_ab['p_final_A'] = predict_meta_logit(meta_model, df_ab, ctx_cols)
+            print(df_ab.tail())
+
+            meta_model, ctx_cols, cv_metrics = train_meta_logit(df_ab, add_context=False)
+            print('CV metrics:', cv_metrics)
+
+            # 3) Inference on the same or future matches (A perspective)
+            df_ab['p_final_A'] = predict_meta_logit(meta_model, df_ab, ctx_cols)
+            print(df_ab.sort_values(by=['Date'], ascending=True).tail())
 
 
 
     def run_analysis(self):
         self.h2h_get()
-
         self.get_rank_feature()
         self.rank_feature_validation()
         self.get_h2h_feature()
         self.h2h_feature_validation()
+
+        self.all_features_validation()
 
         # self.h2h_feature_test()
         # self.ranking_get()
